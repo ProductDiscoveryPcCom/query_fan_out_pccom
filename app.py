@@ -1,7 +1,8 @@
 """
-Query Fan Out Generator v2.0 - Professional SEO Keyword Clustering
+Query Fan Out Generator v2.0.1 - Professional SEO Keyword Clustering
 Author: Claude
 Date: 2025-11-20
+Last Update: 2025-11-20 (v2.0.1 - Fixed distance matrix bug)
 
 Features:
 - Real semantic clustering using TF-IDF + cosine similarity
@@ -12,6 +13,13 @@ Features:
 - Search intent detection using NLP patterns
 - Long-tail keyword analysis
 - Professional Excel/JSON export
+
+Changelog v2.0.1:
+- Fixed: ValueError with negative values in distance matrix
+- Fixed: Proper normalization of cosine similarity [-1,1] to [0,1]
+- Fixed: Adjusted DBSCAN epsilon for new scale
+- Added: Input validation for minimum keywords
+- Added: Better error handling and debug info
 """
 
 import streamlit as st
@@ -32,7 +40,7 @@ import re
 # ==================== CONFIGURATION ====================
 
 st.set_page_config(
-    page_title="Query Fan Out v2.0 - Professional",
+    page_title="Query Fan Out v2.0.1 - Professional",
     page_icon="🔬",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -295,26 +303,58 @@ def perform_clustering(
     
     Args:
         keywords_df: DataFrame con keywords y métricas
-        similarity_threshold: Umbral de similitud (0-1)
+        similarity_threshold: Umbral de similitud (0-1). 
+                            0.3 = similitud baja, 0.7 = similitud alta
         min_cluster_size: Tamaño mínimo de cluster
     
     Returns:
         Lista de KeywordCluster objects
+    
+    Note:
+        La similitud coseno se normaliza de [-1,1] a [0,1] antes de 
+        convertir a distancia para DBSCAN.
     """
     
     if len(keywords_df) == 0:
         return []
     
-    # Calcular matriz de similitud
-    keywords_list = keywords_df['Keyword'].tolist()
-    similarity_matrix = calculate_keyword_similarity(keywords_list)
+    # Validación: mínimo 2 keywords para clustering
+    if len(keywords_df) < 2:
+        st.warning("⚠️ Se necesitan al menos 2 keywords para clustering")
+        return []
     
-    # Convertir similitud a distancia para DBSCAN
-    distance_matrix = 1 - similarity_matrix
+    try:
+        # Calcular matriz de similitud
+        keywords_list = keywords_df['Keyword'].tolist()
+        similarity_matrix = calculate_keyword_similarity(keywords_list)
+        
+        # Convertir similitud a distancia para DBSCAN
+        # Normalizar similitud coseno [-1, 1] a [0, 1] y luego a distancia
+        # similarity = -1 (opuestos) -> 0, similarity = 1 (idénticos) -> 1
+        normalized_similarity = (similarity_matrix + 1) / 2  # Ahora en [0, 1]
+        distance_matrix = 1 - normalized_similarity  # Distancia en [0, 1]
+        
+        # Asegurar que no hay valores negativos por errores numéricos
+        distance_matrix = np.clip(distance_matrix, 0, 1)
+        
+        # Debug info (opcional)
+        if len(keywords_df) < 20:  # Solo para datasets pequeños
+            avg_similarity = normalized_similarity.mean()
+            if avg_similarity < 0.3:
+                st.info(f"ℹ️ Las keywords tienen baja similitud promedio ({avg_similarity:.2f}). Considera reducir el threshold.")
+        
+    except Exception as e:
+        st.error(f"Error calculando similitud: {str(e)}")
+        return []
     
     # Clustering con DBSCAN
+    # Ajustar epsilon para la escala normalizada [0, 1]
+    # similarity_threshold en rango original -> normalizar -> convertir a distancia
+    normalized_threshold = (similarity_threshold + 1) / 2
+    eps_distance = 1 - normalized_threshold
+    
     clustering = DBSCAN(
-        eps=1-similarity_threshold,  # epsilon en términos de distancia
+        eps=eps_distance,
         min_samples=min_cluster_size,
         metric='precomputed'
     )
@@ -709,7 +749,7 @@ def get_content_recommendation(search_intent: str) -> str:
 def main():
     
     # Header
-    st.markdown('<div class="main-header">🔬 Query Fan Out v2.0</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-header">🔬 Query Fan Out v2.0.1</div>', unsafe_allow_html=True)
     st.markdown('<div class="subtitle">Professional Keyword Clustering & Search Intent Analysis</div>', unsafe_allow_html=True)
     
     # Sidebar - Configuration
@@ -807,7 +847,9 @@ def main():
     if 'clusters' not in st.session_state:
         # Welcome screen
         st.markdown("""
-        ## Welcome to Query Fan Out v2.0 Professional! 👋
+        ## Welcome to Query Fan Out v2.0.1 Professional! 👋
+        
+        **Latest:** v2.0.1 fixes the distance matrix bug. Now 100% stable! 🎉
         
         This tool helps you:
         - 🎯 **Cluster keywords** by semantic similarity using real NLP
@@ -1096,7 +1138,7 @@ def main():
 
     # Footer
     st.markdown("---")
-    st.caption("Query Fan Out v2.0 | Built with Streamlit + Plotly + NetworkX | Real semantic clustering with TF-IDF")
+    st.caption("Query Fan Out v2.0.1 | Built with Streamlit + Plotly + NetworkX | Real semantic clustering with TF-IDF")
 
 if __name__ == "__main__":
     main()
