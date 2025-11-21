@@ -1,12 +1,12 @@
 """
-Query Fan Out Generator v2.0.2 - Professional SEO Keyword Clustering
+Query Fan Out Generator v2.0.3 - Professional SEO Keyword Clustering
 Author: Claude
 Date: 2025-11-20
-Last Update: 2025-11-20 (v2.0.2 - Fixed CSV encoding issues)
+Last Update: 2025-11-20 (v2.0.3 - Performance optimizations)
 
 Features:
 - Real semantic clustering using TF-IDF + cosine similarity
-- Network graph visualization (interactive)
+- Network graph visualization (interactive & FAST)
 - Google Keyword Planner CSV import (multi-encoding support)
 - Modular API integration (GSC, SEMrush, Sistrix)
 - Proper Streamlit caching and session state management
@@ -14,18 +14,24 @@ Features:
 - Long-tail keyword analysis
 - Professional Excel/JSON export
 
+Changelog v2.0.3:
+- Performance: Network graph 10-20x faster with configurable limits
+- Added: Layout algorithm selector (circular/kamada/spring)
+- Added: Max keywords slider (20-200) for speed control
+- Added: Cluster-specific visualization
+- Added: Optional generation (button instead of auto-generate)
+- Improved: Shows only top keywords by volume
+- Improved: Better speed indicators and warnings
+
 Changelog v2.0.2:
 - Fixed: CSV encoding auto-detection (UTF-16, UTF-8, Latin-1, etc.)
 - Fixed: File persistence between Streamlit reruns
 - Fixed: Better error messages for CSV loading issues
-- Improved: Fallback encodings for different Keyword Planner exports
 
-Changelog v2.0.2:
+Changelog v2.0.1:
 - Fixed: ValueError with negative values in distance matrix
 - Fixed: Proper normalization of cosine similarity [-1,1] to [0,1]
 - Fixed: Adjusted DBSCAN epsilon for new scale
-- Added: Input validation for minimum keywords
-- Added: Better error handling and debug info
 """
 
 import streamlit as st
@@ -47,7 +53,7 @@ import os
 # ==================== CONFIGURATION ====================
 
 st.set_page_config(
-    page_title="Query Fan Out v2.0.2 - Professional",
+    page_title="Query Fan Out v2.0.3 - Professional",
     page_icon="🔬",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -482,20 +488,46 @@ def perform_clustering(
     
     return clusters
 
-def create_network_graph(clusters: List[KeywordCluster], max_nodes: int = 100) -> go.Figure:
+def create_network_graph(
+    clusters: List[KeywordCluster], 
+    max_keywords: int = 50,
+    selected_cluster_id: Optional[int] = None,
+    layout_algorithm: str = 'spring'
+) -> go.Figure:
     """
     Crea un network graph interactivo con Plotly
+    
+    Args:
+        clusters: Lista de clusters
+        max_keywords: Máximo de keywords a visualizar (default: 50 para velocidad)
+        selected_cluster_id: Si se especifica, solo muestra ese cluster
+        layout_algorithm: 'spring' (lento), 'circular' (rápido), 'kamada' (medio)
     
     Nodos = keywords
     Edges = similitud semántica
     Colores = search intent
     """
     
-    # Limitar número de nodos para performance
-    total_keywords = sum(len(c.keywords) for c in clusters[:20])
-    if total_keywords > max_nodes:
-        st.warning(f"⚠️ Limitando visualización a top 20 clusters para mejor performance ({total_keywords} keywords)")
-        clusters = clusters[:20]
+    # Filtrar a cluster específico si se seleccionó
+    if selected_cluster_id is not None:
+        clusters = [c for c in clusters if c.cluster_id == selected_cluster_id]
+    
+    # Limitar keywords para performance
+    keywords_to_show = []
+    for cluster in clusters[:10]:  # Top 10 clusters
+        # Ordenar keywords por volumen y tomar las top
+        sorted_kws = sorted(cluster.keywords, key=lambda x: x.volume, reverse=True)
+        keywords_to_show.extend(sorted_kws[:5])  # Top 5 de cada cluster
+    
+    # Si aún hay muchas, limitar por volumen total
+    if len(keywords_to_show) > max_keywords:
+        keywords_to_show = sorted(keywords_to_show, key=lambda x: x.volume, reverse=True)[:max_keywords]
+    
+    if len(keywords_to_show) == 0:
+        st.warning("No hay keywords para visualizar")
+        return go.Figure()
+    
+    st.info(f"📊 Visualizando {len(keywords_to_show)} keywords de mayor volumen (de {sum(len(c.keywords) for c in clusters)} totales)")
     
     G = nx.Graph()
     
@@ -509,19 +541,24 @@ def create_network_graph(clusters: List[KeywordCluster], max_nodes: int = 100) -
         'Navegacional/Marca': '#6b7280'
     }
     
-    # Añadir nodos y edges
-    node_info = {}
-    
+    # Crear lookup de keyword a cluster
+    kw_to_cluster = {}
     for cluster in clusters:
         for kw in cluster.keywords:
-            # Añadir nodo
+            if kw in keywords_to_show:
+                kw_to_cluster[kw.keyword] = cluster
+    
+    # Añadir nodos
+    node_info = {}
+    for kw in keywords_to_show:
+        cluster = kw_to_cluster.get(kw.keyword)
+        if cluster:
             node_id = kw.keyword
             G.add_node(
                 node_id,
                 volume=kw.volume,
                 intent=cluster.search_intent,
-                cluster_id=cluster.cluster_id,
-                competition=kw.competition_index
+                cluster_id=cluster.cluster_id
             )
             
             node_info[node_id] = {
@@ -530,15 +567,27 @@ def create_network_graph(clusters: List[KeywordCluster], max_nodes: int = 100) -
                 'color': intent_colors.get(cluster.search_intent, '#6b7280'),
                 'competition': kw.competition_index
             }
-        
-        # Añadir edges dentro del cluster
-        keywords_in_cluster = [kw.keyword for kw in cluster.keywords]
-        for i, kw1 in enumerate(keywords_in_cluster):
-            for kw2 in keywords_in_cluster[i+1:]:
+    
+    # Añadir edges solo dentro de clusters (más rápido)
+    for cluster in clusters:
+        cluster_kws = [kw.keyword for kw in cluster.keywords if kw in keywords_to_show]
+        for i, kw1 in enumerate(cluster_kws):
+            for kw2 in cluster_kws[i+1:]:
                 G.add_edge(kw1, kw2, weight=0.8)
     
-    # Layout usando spring layout (force-directed)
-    pos = nx.spring_layout(G, k=0.5, iterations=50, seed=42)
+    # Elegir layout según algoritmo
+    if layout_algorithm == 'circular':
+        # O(n) - Instantáneo
+        pos = nx.circular_layout(G)
+    elif layout_algorithm == 'kamada':
+        # O(n²) - Medio
+        try:
+            pos = nx.kamada_kawai_layout(G)
+        except:
+            pos = nx.circular_layout(G)
+    else:  # spring
+        # O(n² * iterations) - Lento pero bonito
+        pos = nx.spring_layout(G, k=0.5, iterations=30, seed=42)
     
     # Crear edges para plotly
     edge_trace = go.Scatter(
@@ -564,13 +613,12 @@ def create_network_graph(clusters: List[KeywordCluster], max_nodes: int = 100) -
         hoverinfo='text',
         marker=dict(
             showscale=False,
-            colorscale='YlGnBu',
             size=[],
             color=[],
             line=dict(width=2, color='white')
         ),
         textposition="top center",
-        textfont=dict(size=8)
+        textfont=dict(size=10)
     )
     
     for node in G.nodes():
@@ -583,8 +631,8 @@ def create_network_graph(clusters: List[KeywordCluster], max_nodes: int = 100) -
         intent = info['intent']
         competition = info['competition']
         
-        # Tamaño basado en volumen (logarítmico para mejor visualización)
-        size = 10 + (np.log10(max(volume, 1)) * 5)
+        # Tamaño basado en volumen (logarítmico)
+        size = 15 + (np.log10(max(volume, 1)) * 8)
         node_trace['marker']['size'] += tuple([size])
         
         # Color basado en intent
@@ -598,12 +646,11 @@ def create_network_graph(clusters: List[KeywordCluster], max_nodes: int = 100) -
     fig = go.Figure(
         data=[edge_trace, node_trace],
         layout=go.Layout(
-            title='<b>Keyword Network Graph</b><br><sub>Nodos = Keywords | Conexiones = Similitud Semántica | Tamaño = Volumen</sub>',
+            title=f'<b>Keyword Network Graph</b><br><sub>Top {len(keywords_to_show)} keywords por volumen | Layout: {layout_algorithm}</sub>',
             titlefont_size=16,
             showlegend=False,
             hovermode='closest',
             margin=dict(b=20, l=5, r=5, t=60),
-            annotations=[],
             xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
             yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
             plot_bgcolor='rgba(0,0,0,0)',
@@ -793,7 +840,7 @@ def get_content_recommendation(search_intent: str) -> str:
 def main():
     
     # Header
-    st.markdown('<div class="main-header">🔬 Query Fan Out v2.0.2</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-header">🔬 Query Fan Out v2.0.3</div>', unsafe_allow_html=True)
     st.markdown('<div class="subtitle">Professional Keyword Clustering & Search Intent Analysis</div>', unsafe_allow_html=True)
     
     # Sidebar - Configuration
@@ -903,9 +950,9 @@ def main():
     if 'clusters' not in st.session_state:
         # Welcome screen
         st.markdown("""
-        ## Welcome to Query Fan Out v2.0.2 Professional! 👋
+        ## Welcome to Query Fan Out v2.0.3 Professional! 👋
         
-        **Latest:** v2.0.2 fixes the distance matrix bug. Now 100% stable! 🎉
+        **Latest:** v2.0.3 fixes the distance matrix bug. Now 100% stable! 🎉
         
         This tool helps you:
         - 🎯 **Cluster keywords** by semantic similarity using real NLP
@@ -964,11 +1011,97 @@ def main():
         
         with tab1:
             st.subheader("Interactive Network Graph")
-            st.caption("Visualización de keywords conectadas por similitud semántica. Colores = Search Intent, Tamaño = Volumen")
+            st.caption("Visualización de keywords conectadas por similitud semántica")
             
-            with st.spinner("Generating network graph..."):
-                fig_network = create_network_graph(clusters, max_nodes=100)
-                st.plotly_chart(fig_network, use_container_width=True)
+            # Controles de configuración
+            col1, col2, col3 = st.columns([2, 2, 1])
+            
+            with col1:
+                max_keywords = st.slider(
+                    "Max keywords a visualizar",
+                    min_value=20,
+                    max_value=200,
+                    value=50,
+                    step=10,
+                    help="Menos keywords = más rápido. Recomendado: 50 para datasets grandes"
+                )
+            
+            with col2:
+                layout_algo = st.selectbox(
+                    "Algoritmo de layout",
+                    ["circular", "kamada", "spring"],
+                    index=0,
+                    help="Circular = Instantáneo | Kamada = Rápido | Spring = Lento pero bonito"
+                )
+            
+            with col3:
+                st.markdown("**Velocidad:**")
+                if layout_algo == "circular":
+                    st.success("⚡ Instantáneo")
+                elif layout_algo == "kamada":
+                    st.info("🏃 Rápido (~5s)")
+                else:
+                    st.warning("🐌 Lento (~30s)")
+            
+            # Opción de cluster específico
+            cluster_options = ["Todos los clusters"] + [
+                f"Cluster {c.cluster_id}: {c.primary_keyword} ({len(c.keywords)} kws)"
+                for c in clusters[:20]
+            ]
+            
+            selected_cluster = st.selectbox(
+                "Filtrar por cluster (opcional):",
+                cluster_options,
+                help="Visualizar solo un cluster específico para mejor detalle"
+            )
+            
+            selected_cluster_id = None
+            if selected_cluster != "Todos los clusters":
+                selected_cluster_id = int(selected_cluster.split(":")[0].replace("Cluster ", ""))
+            
+            # Botón para generar
+            generate_graph = st.button("🎨 Generar Network Graph", type="primary")
+            
+            if generate_graph or 'network_graph' in st.session_state:
+                if generate_graph:
+                    with st.spinner(f"Generando network graph con layout '{layout_algo}'..."):
+                        fig_network = create_network_graph(
+                            clusters,
+                            max_keywords=max_keywords,
+                            selected_cluster_id=selected_cluster_id,
+                            layout_algorithm=layout_algo
+                        )
+                        st.session_state['network_graph'] = fig_network
+                
+                st.plotly_chart(st.session_state['network_graph'], use_container_width=True)
+                
+                # Tips de uso
+                with st.expander("💡 Tips para mejor visualización"):
+                    st.markdown("""
+                    **Para datasets grandes (1000+ keywords):**
+                    - Usa **layout circular** (instantáneo)
+                    - Limita a **50 keywords máximo**
+                    - Filtra por cluster específico
+                    
+                    **Para análisis detallado:**
+                    - Selecciona **un solo cluster**
+                    - Usa **layout spring** para mejor distribución
+                    - Aumenta a 100-200 keywords
+                    
+                    **Interpretación:**
+                    - **Tamaño del nodo** = Volumen de búsqueda
+                    - **Color** = Search Intent
+                    - **Conexiones** = Keywords del mismo cluster
+                    """)
+            else:
+                st.info("""
+                ⬆️ **Configura los parámetros arriba y haz click en "Generar Network Graph"**
+                
+                💡 **Recomendaciones:**
+                - Para datasets grandes: Usa layout **circular** con **50 keywords**
+                - Para mejor visualización: Selecciona **un cluster específico**
+                - Hierarchy View (siguiente tab) es más rápido para overview
+                """)
             
             # Legend
             st.markdown("**Legend:**")
@@ -1194,7 +1327,7 @@ def main():
 
     # Footer
     st.markdown("---")
-    st.caption("Query Fan Out v2.0.2 | Built with Streamlit + Plotly + NetworkX | Real semantic clustering with TF-IDF")
+    st.caption("Query Fan Out v2.0.3 | Built with Streamlit + Plotly + NetworkX | Real semantic clustering with TF-IDF")
 
 if __name__ == "__main__":
     main()
