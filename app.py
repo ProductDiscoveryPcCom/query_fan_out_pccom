@@ -1,18 +1,25 @@
 """
-Query Fan Out Generator v2.0.3 - Professional SEO Keyword Clustering
+Query Fan Out Generator v2.0.4 - Professional SEO Keyword Clustering
 Author: Claude
 Date: 2025-11-20
-Last Update: 2025-11-20 (v2.0.3 - Performance optimizations)
+Last Update: 2025-11-20 (v2.0.4 - Volume range filter)
 
 Features:
 - Real semantic clustering using TF-IDF + cosine similarity
 - Network graph visualization (interactive & FAST)
 - Google Keyword Planner CSV import (multi-encoding support)
+- Volume range filter for targeted analysis
 - Modular API integration (GSC, SEMrush, Sistrix)
 - Proper Streamlit caching and session state management
 - Search intent detection using NLP patterns
 - Long-tail keyword analysis
 - Professional Excel/JSON export
+
+Changelog v2.0.4:
+- Added: Volume range filter in sidebar (min/max search volume)
+- Added: Real-time statistics showing filtered keywords count
+- Improved: Better control over which keywords to analyze
+- Improved: Faster processing for large datasets by pre-filtering
 
 Changelog v2.0.3:
 - Performance: Network graph 10-20x faster with configurable limits
@@ -22,16 +29,6 @@ Changelog v2.0.3:
 - Added: Optional generation (button instead of auto-generate)
 - Improved: Shows only top keywords by volume
 - Improved: Better speed indicators and warnings
-
-Changelog v2.0.2:
-- Fixed: CSV encoding auto-detection (UTF-16, UTF-8, Latin-1, etc.)
-- Fixed: File persistence between Streamlit reruns
-- Fixed: Better error messages for CSV loading issues
-
-Changelog v2.0.1:
-- Fixed: ValueError with negative values in distance matrix
-- Fixed: Proper normalization of cosine similarity [-1,1] to [0,1]
-- Fixed: Adjusted DBSCAN epsilon for new scale
 """
 
 import streamlit as st
@@ -53,7 +50,7 @@ import os
 # ==================== CONFIGURATION ====================
 
 st.set_page_config(
-    page_title="Query Fan Out v2.0.3 - Professional",
+    page_title="Query Fan Out v2.0.4 - Professional",
     page_icon="🔬",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -333,14 +330,6 @@ def calculate_keyword_similarity(keywords: List[str], method='tfidf') -> np.ndar
         similarity_matrix = cosine_similarity(tfidf_matrix)
         
         return similarity_matrix
-    
-    # TODO: Implementar con sentence-transformers cuando esté disponible
-    # elif method == 'semantic':
-    #     from sentence_transformers import SentenceTransformer
-    #     model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
-    #     embeddings = model.encode(keywords)
-    #     similarity_matrix = cosine_similarity(embeddings)
-    #     return similarity_matrix
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def perform_clustering(
@@ -380,7 +369,6 @@ def perform_clustering(
         
         # Convertir similitud a distancia para DBSCAN
         # Normalizar similitud coseno [-1, 1] a [0, 1] y luego a distancia
-        # similarity = -1 (opuestos) -> 0, similarity = 1 (idénticos) -> 1
         normalized_similarity = (similarity_matrix + 1) / 2  # Ahora en [0, 1]
         distance_matrix = 1 - normalized_similarity  # Distancia en [0, 1]
         
@@ -398,8 +386,6 @@ def perform_clustering(
         return []
     
     # Clustering con DBSCAN
-    # Ajustar epsilon para la escala normalizada [0, 1]
-    # similarity_threshold en rango original -> normalizar -> convertir a distancia
     normalized_threshold = (similarity_threshold + 1) / 2
     eps_distance = 1 - normalized_threshold
     
@@ -496,16 +482,6 @@ def create_network_graph(
 ) -> go.Figure:
     """
     Crea un network graph interactivo con Plotly
-    
-    Args:
-        clusters: Lista de clusters
-        max_keywords: Máximo de keywords a visualizar (default: 50 para velocidad)
-        selected_cluster_id: Si se especifica, solo muestra ese cluster
-        layout_algorithm: 'spring' (lento), 'circular' (rápido), 'kamada' (medio)
-    
-    Nodos = keywords
-    Edges = similitud semántica
-    Colores = search intent
     """
     
     # Filtrar a cluster específico si se seleccionó
@@ -515,7 +491,6 @@ def create_network_graph(
     # Limitar keywords para performance
     keywords_to_show = []
     for cluster in clusters[:10]:  # Top 10 clusters
-        # Ordenar keywords por volumen y tomar las top
         sorted_kws = sorted(cluster.keywords, key=lambda x: x.volume, reverse=True)
         keywords_to_show.extend(sorted_kws[:5])  # Top 5 de cada cluster
     
@@ -577,16 +552,13 @@ def create_network_graph(
     
     # Elegir layout según algoritmo
     if layout_algorithm == 'circular':
-        # O(n) - Instantáneo
         pos = nx.circular_layout(G)
     elif layout_algorithm == 'kamada':
-        # O(n²) - Medio
         try:
             pos = nx.kamada_kawai_layout(G)
         except:
             pos = nx.circular_layout(G)
     else:  # spring
-        # O(n² * iterations) - Lento pero bonito
         pos = nx.spring_layout(G, k=0.5, iterations=30, seed=42)
     
     # Crear edges para plotly
@@ -840,7 +812,7 @@ def get_content_recommendation(search_intent: str) -> str:
 def main():
     
     # Header
-    st.markdown('<div class="main-header">🔬 Query Fan Out v2.0.3</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-header">🔬 Query Fan Out v2.0.4</div>', unsafe_allow_html=True)
     st.markdown('<div class="subtitle">Professional Keyword Clustering & Search Intent Analysis</div>', unsafe_allow_html=True)
     
     # Sidebar - Configuration
@@ -897,8 +869,43 @@ def main():
                         st.success(f"✅ Loaded {len(df)} demo keywords")
                         st.session_state['keywords_df'] = df
         
+        # Volume filter
+        st.subheader("2️⃣ Volume Filter")
+        
+        if 'keywords_df' in st.session_state and len(st.session_state['keywords_df']) > 0:
+            df = st.session_state['keywords_df']
+            min_vol = int(df['Avg.monthlysearches'].min())
+            max_vol = int(df['Avg.monthlysearches'].max())
+            
+            st.caption(f"Available range: {min_vol:,} - {max_vol:,} searches/month")
+            
+            volume_range = st.slider(
+                "Filter by Monthly Search Volume",
+                min_value=min_vol,
+                max_value=max_vol,
+                value=(min_vol, max_vol),
+                step=max(1, (max_vol - min_vol) // 100),
+                help="Only analyze keywords within this volume range"
+            )
+            
+            # Mostrar estadísticas del filtro
+            filtered_count = len(df[(df['Avg.monthlysearches'] >= volume_range[0]) & 
+                                   (df['Avg.monthlysearches'] <= volume_range[1])])
+            total_count = len(df)
+            
+            if filtered_count < total_count:
+                st.info(f"📊 Will analyze {filtered_count:,} of {total_count:,} keywords ({filtered_count/total_count*100:.1f}%)")
+            else:
+                st.success(f"✅ Analyzing all {total_count:,} keywords")
+                
+            # Guardar el rango en session_state
+            st.session_state['volume_range'] = volume_range
+        else:
+            st.info("⬆️ Load data first to see volume range")
+            volume_range = None
+        
         # Clustering settings
-        st.subheader("2️⃣ Clustering Settings")
+        st.subheader("3️⃣ Clustering Settings")
         
         similarity_threshold = st.slider(
             "Similarity Threshold",
@@ -920,14 +927,27 @@ def main():
         # Run clustering
         if st.button("🚀 Run Clustering", type="primary"):
             if 'keywords_df' in st.session_state and len(st.session_state['keywords_df']) > 0:
-                with st.spinner("Running semantic clustering..."):
-                    clusters = perform_clustering(
-                        st.session_state['keywords_df'],
-                        similarity_threshold=similarity_threshold,
-                        min_cluster_size=min_cluster_size
-                    )
-                    st.session_state['clusters'] = clusters
-                    st.success(f"✅ Created {len(clusters)} clusters")
+                # Aplicar filtro de volumen
+                df = st.session_state['keywords_df']
+                
+                if 'volume_range' in st.session_state and volume_range is not None:
+                    df_filtered = df[(df['Avg.monthlysearches'] >= volume_range[0]) & 
+                                    (df['Avg.monthlysearches'] <= volume_range[1])].copy()
+                    st.info(f"🔍 Filtering to {len(df_filtered):,} keywords in volume range {volume_range[0]:,} - {volume_range[1]:,}")
+                else:
+                    df_filtered = df.copy()
+                
+                if len(df_filtered) > 0:
+                    with st.spinner("Running semantic clustering..."):
+                        clusters = perform_clustering(
+                            df_filtered,
+                            similarity_threshold=similarity_threshold,
+                            min_cluster_size=min_cluster_size
+                        )
+                        st.session_state['clusters'] = clusters
+                        st.success(f"✅ Created {len(clusters)} clusters from {len(df_filtered):,} keywords")
+                else:
+                    st.error("⚠️ No keywords in selected volume range")
             else:
                 st.error("⚠️ Please load keyword data first")
         
@@ -950,35 +970,33 @@ def main():
     if 'clusters' not in st.session_state:
         # Welcome screen
         st.markdown("""
-        ## Welcome to Query Fan Out v2.0.3 Professional! 👋
+        ## Welcome to Query Fan Out v2.0.4 Professional! 👋
         
-        **Latest:** v2.0.3 fixes the distance matrix bug. Now 100% stable! 🎉
+        **Latest:** v2.0.4 adds volume range filter for better control! 🎯
         
         This tool helps you:
         - 🎯 **Cluster keywords** by semantic similarity using real NLP
         - 🔍 **Detect search intent** automatically (Transaccional, Informacional, etc.)
-        - 📊 **Visualize relationships** with interactive network graphs
+        - 📊 **Filter by volume** to focus on high/low volume keywords
         - 📈 **Analyze opportunity** based on volume, competition, and trends
         - 📝 **Generate content strategies** based on keyword clusters
         
         ### How to use:
         1. **Upload your CSV** from Google Keyword Planner (or use demo data)
-        2. **Adjust clustering settings** in the sidebar
-        3. **Run clustering** and explore results
-        4. **Export to Excel** for your content team
+        2. **Set volume range** to filter keywords (optional)
+        3. **Adjust clustering settings** in the sidebar
+        4. **Run clustering** and explore results
+        5. **Export to Excel** for your content team
         
-        ### What's different from v1.0?
-        ✅ Real semantic clustering (not templates)  
-        ✅ Network graph visualization  
-        ✅ Actual keyword data from Keyword Planner  
-        ✅ Search intent detection with NLP  
-        ✅ Professional Excel export  
-        ✅ Proper Streamlit architecture (caching, no session state bugs)  
+        ### What's new in v2.0.4?
+        ✅ **Volume Range Filter** - Analyze only keywords in specific volume range  
+        ✅ **Real-time Statistics** - See how many keywords match your filters  
+        ✅ **Better Performance** - Faster processing with pre-filtering  
         
         **Get started by uploading your data in the sidebar! 👈**
         """)
         
-        st.markdown('<div class="info-box">💡 <b>Tip:</b> Export your keyword ideas from Google Ads Keyword Planner and upload the CSV here. The tool will automatically parse volumes, competition, CPC data, etc.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="info-box">💡 <b>Tip:</b> Use the volume filter to focus on high-volume opportunities (>1000 searches) or long-tail keywords (<500 searches).</div>', unsafe_allow_html=True)
     
     else:
         # Show results
@@ -1327,7 +1345,7 @@ def main():
 
     # Footer
     st.markdown("---")
-    st.caption("Query Fan Out v2.0.3 | Built with Streamlit + Plotly + NetworkX | Real semantic clustering with TF-IDF")
+    st.caption("Query Fan Out v2.0.4 | Built with Streamlit + Plotly + NetworkX | Real semantic clustering with TF-IDF")
 
 if __name__ == "__main__":
     main()
