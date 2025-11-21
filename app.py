@@ -1,20 +1,26 @@
 """
-Query Fan Out Generator v2.0.1 - Professional SEO Keyword Clustering
+Query Fan Out Generator v2.0.2 - Professional SEO Keyword Clustering
 Author: Claude
 Date: 2025-11-20
-Last Update: 2025-11-20 (v2.0.1 - Fixed distance matrix bug)
+Last Update: 2025-11-20 (v2.0.2 - Fixed CSV encoding issues)
 
 Features:
 - Real semantic clustering using TF-IDF + cosine similarity
 - Network graph visualization (interactive)
-- Google Keyword Planner CSV import
+- Google Keyword Planner CSV import (multi-encoding support)
 - Modular API integration (GSC, SEMrush, Sistrix)
 - Proper Streamlit caching and session state management
 - Search intent detection using NLP patterns
 - Long-tail keyword analysis
 - Professional Excel/JSON export
 
-Changelog v2.0.1:
+Changelog v2.0.2:
+- Fixed: CSV encoding auto-detection (UTF-16, UTF-8, Latin-1, etc.)
+- Fixed: File persistence between Streamlit reruns
+- Fixed: Better error messages for CSV loading issues
+- Improved: Fallback encodings for different Keyword Planner exports
+
+Changelog v2.0.2:
 - Fixed: ValueError with negative values in distance matrix
 - Fixed: Proper normalization of cosine similarity [-1,1] to [0,1]
 - Fixed: Adjusted DBSCAN epsilon for new scale
@@ -36,11 +42,12 @@ from dataclasses import dataclass, asdict
 from datetime import datetime
 import io
 import re
+import os
 
 # ==================== CONFIGURATION ====================
 
 st.set_page_config(
-    page_title="Query Fan Out v2.0.1 - Professional",
+    page_title="Query Fan Out v2.0.2 - Professional",
     page_icon="🔬",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -156,35 +163,72 @@ def parse_numeric_value(value: str) -> float:
 def load_keyword_planner_csv(file_path: str) -> pd.DataFrame:
     """
     Carga y procesa CSV de Google Keyword Planner
-    El formato viene con encoding UTF-16 y espacios entre caracteres
+    Intenta múltiples encodings y formatos automáticamente
     """
-    try:
-        # Leer con encoding UTF-16
-        df = pd.read_csv(file_path, encoding='utf-16', sep='\t', skiprows=2)
-        
-        # Limpiar nombres de columnas
-        df.columns = [clean_keyword_planner_value(col) for col in df.columns]
-        
-        # Limpiar valores de todas las columnas de texto
-        for col in df.columns:
-            if df[col].dtype == 'object':
-                df[col] = df[col].apply(clean_keyword_planner_value)
-        
-        # Procesar columnas numéricas
-        df['Avg.monthlysearches'] = df['Avg.monthlysearches'].apply(parse_numeric_value)
-        df['Competitionindexedvalue'] = df.get('Competition(indexedvalue)', pd.Series([0]*len(df))).apply(parse_numeric_value)
-        df['Topofpagebid(lowrange)'] = df.get('Topofpagebid(lowrange)', pd.Series([0]*len(df))).apply(parse_numeric_value)
-        df['Topofpagebid(highrange)'] = df.get('Topofpagebid(highrange)', pd.Series([0]*len(df))).apply(parse_numeric_value)
-        
-        # Cambios de tendencia
-        df['Cambioentresmeses'] = df.get('Cambioentresmeses', pd.Series(['0%']*len(df))).apply(lambda x: parse_numeric_value(str(x).replace('%', '')))
-        df['Cambiointere anual'] = df.get('Cambiointere anual', pd.Series(['0%']*len(df))).apply(lambda x: parse_numeric_value(str(x).replace('%', '')))
-        
-        return df
     
-    except Exception as e:
-        st.error(f"Error leyendo CSV: {str(e)}")
-        return pd.DataFrame()
+    # Lista de encodings a probar (en orden de probabilidad)
+    encodings_to_try = [
+        ('utf-16', '\t'),      # Formato más común de Keyword Planner
+        ('utf-16-le', '\t'),   # UTF-16 Little Endian
+        ('utf-16-be', '\t'),   # UTF-16 Big Endian
+        ('utf-8', ','),        # UTF-8 con comas
+        ('utf-8', '\t'),       # UTF-8 con tabs
+        ('latin-1', ','),      # Fallback
+        ('cp1252', ','),       # Windows encoding
+    ]
+    
+    df = None
+    last_error = None
+    
+    for encoding, separator in encodings_to_try:
+        try:
+            # Intentar leer con este encoding
+            df = pd.read_csv(file_path, encoding=encoding, sep=separator, skiprows=2)
+            
+            # Verificar que tiene las columnas esperadas
+            if 'Keyword' in str(df.columns) or 'keyword' in str(df.columns).lower():
+                # Éxito! Procesar el dataframe
+                
+                # Limpiar nombres de columnas
+                df.columns = [clean_keyword_planner_value(col) for col in df.columns]
+                
+                # Limpiar valores de todas las columnas de texto
+                for col in df.columns:
+                    if df[col].dtype == 'object':
+                        df[col] = df[col].apply(clean_keyword_planner_value)
+                
+                # Procesar columnas numéricas con nombres limpios
+                if 'Avg.monthlysearches' in df.columns:
+                    df['Avg.monthlysearches'] = df['Avg.monthlysearches'].apply(parse_numeric_value)
+                else:
+                    st.warning("⚠️ Columna 'Avg. monthly searches' no encontrada")
+                    df['Avg.monthlysearches'] = 0
+                
+                df['Competitionindexedvalue'] = df.get('Competition(indexedvalue)', pd.Series([0]*len(df))).apply(parse_numeric_value)
+                df['Topofpagebid(lowrange)'] = df.get('Topofpagebid(lowrange)', pd.Series([0]*len(df))).apply(parse_numeric_value)
+                df['Topofpagebid(highrange)'] = df.get('Topofpagebid(highrange)', pd.Series([0]*len(df))).apply(parse_numeric_value)
+                
+                # Cambios de tendencia
+                df['Cambioentresmeses'] = df.get('Cambioentresmeses', pd.Series(['0%']*len(df))).apply(lambda x: parse_numeric_value(str(x).replace('%', '')))
+                df['Cambiointere anual'] = df.get('Cambiointere anual', pd.Series(['0%']*len(df))).apply(lambda x: parse_numeric_value(str(x).replace('%', '')))
+                
+                # Éxito - retornar dataframe
+                st.success(f"✅ CSV cargado con encoding: {encoding}")
+                return df
+                
+        except Exception as e:
+            last_error = str(e)
+            continue  # Intentar siguiente encoding
+    
+    # Si llegamos aquí, ningún encoding funcionó
+    st.error(f"❌ No se pudo leer el CSV con ningún encoding. Último error: {last_error}")
+    st.info("""
+    💡 **Soluciones:**
+    1. Exporta el CSV nuevamente desde Google Keyword Planner
+    2. Asegúrate de usar la opción "Descargar" → "CSV"
+    3. Si el problema persiste, abre el CSV en Excel y guárdalo como "CSV UTF-8"
+    """)
+    return pd.DataFrame()
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def detect_search_intent(keyword: str) -> Tuple[str, float]:
@@ -749,7 +793,7 @@ def get_content_recommendation(search_intent: str) -> str:
 def main():
     
     # Header
-    st.markdown('<div class="main-header">🔬 Query Fan Out v2.0.1</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-header">🔬 Query Fan Out v2.0.2</div>', unsafe_allow_html=True)
     st.markdown('<div class="subtitle">Professional Keyword Clustering & Search Intent Analysis</div>', unsafe_allow_html=True)
     
     # Sidebar - Configuration
@@ -772,18 +816,30 @@ def main():
             )
             
             if uploaded_file is not None:
-                # Guardar temporalmente
-                temp_path = f"/tmp/{uploaded_file.name}"
-                with open(temp_path, "wb") as f:
-                    f.write(uploaded_file.getvalue())
+                # Usar nombre de archivo único basado en hash del contenido
+                import hashlib
+                file_hash = hashlib.md5(uploaded_file.getvalue()).hexdigest()[:8]
+                temp_path = f"/tmp/keyword_planner_{file_hash}.csv"
                 
-                with st.spinner("Loading keywords..."):
-                    df = load_keyword_planner_csv(temp_path)
-                    if len(df) > 0:
-                        st.success(f"✅ Loaded {len(df)} keywords")
-                        st.session_state['keywords_df'] = df
-                    else:
-                        st.error("Error loading CSV. Check format.")
+                # Solo escribir si no existe o si cambió el archivo
+                if not os.path.exists(temp_path) or 'current_file_hash' not in st.session_state or st.session_state['current_file_hash'] != file_hash:
+                    with open(temp_path, "wb") as f:
+                        f.write(uploaded_file.getvalue())
+                    st.session_state['current_file_hash'] = file_hash
+                    st.session_state['temp_csv_path'] = temp_path
+                
+                # Cargar solo si no está en session_state o si es un archivo nuevo
+                if 'keywords_df' not in st.session_state or st.session_state.get('current_file_hash') != file_hash:
+                    with st.spinner("Loading keywords..."):
+                        df = load_keyword_planner_csv(temp_path)
+                        if len(df) > 0:
+                            st.success(f"✅ Loaded {len(df)} keywords")
+                            st.session_state['keywords_df'] = df
+                        else:
+                            st.error("Error loading CSV. Check format.")
+                else:
+                    # Ya está cargado
+                    st.info(f"📊 Using cached data: {len(st.session_state['keywords_df'])} keywords")
         
         elif data_source == "Use Demo Data":
             if st.button("Load Demo Data"):
@@ -847,9 +903,9 @@ def main():
     if 'clusters' not in st.session_state:
         # Welcome screen
         st.markdown("""
-        ## Welcome to Query Fan Out v2.0.1 Professional! 👋
+        ## Welcome to Query Fan Out v2.0.2 Professional! 👋
         
-        **Latest:** v2.0.1 fixes the distance matrix bug. Now 100% stable! 🎉
+        **Latest:** v2.0.2 fixes the distance matrix bug. Now 100% stable! 🎉
         
         This tool helps you:
         - 🎯 **Cluster keywords** by semantic similarity using real NLP
@@ -1138,7 +1194,7 @@ def main():
 
     # Footer
     st.markdown("---")
-    st.caption("Query Fan Out v2.0.1 | Built with Streamlit + Plotly + NetworkX | Real semantic clustering with TF-IDF")
+    st.caption("Query Fan Out v2.0.2 | Built with Streamlit + Plotly + NetworkX | Real semantic clustering with TF-IDF")
 
 if __name__ == "__main__":
     main()
